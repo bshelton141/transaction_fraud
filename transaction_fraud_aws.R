@@ -1,10 +1,15 @@
+
+
+# R version 3.3.0
+
+
 # ======================================================
 # Configure the environment
 # ======================================================
 
-
 # Install and load required packages
 packages <- c("jsonlite",
+              "corrplot",
               "dplyr",
               "caret",
               "randomForest",
@@ -307,11 +312,9 @@ data2 <- data2 %>%
                               as.character(floor(time_of_day))),
 # Calculate the log of each member's `transactionAmount` to understand
 # relative distributions of transaction amounts for each member
-         LogCustAmt = ifelse(total_trans_count == 1,
-                                NA,
-                                ifelse(abs(transactionAmount) <= 1,
-                                       0,
-                                       sign(transactionAmount)*log10(abs(transactionAmount)))))
+         LogCustAmt = ifelse(abs(transactionAmount) <= 1,
+                             0,
+                             sign(transactionAmount)*log10(abs(transactionAmount))))
 
 
 data2.by_member <- data2 %>%
@@ -527,7 +530,7 @@ train_pred <- train.a %>% select(-Class)
 test_pred <- test.a %>% select(-Class)
 
 
-#Impute the values of numeric variables with the mean of the training set values
+# Impute the values of numeric variables with the mean of the training set values
 train_num <- train_pred[, 1:length(num_fields)]
 test_num <- test_pred[, 1:length(num_fields)]
 
@@ -539,11 +542,10 @@ for(i in 1:ncol(test_num)) {
   test_num[is.na(test_num[,i]), i] <- mean(train_num[,i], na.rm = TRUE)
 }
 
-sapply(train_num, function(x) sum(is.na(x)))
 
 # Impute missing values of categorical variables with the mode of the training set values
-train_cat <- train_pred[, (length(train_pred)+1):ncol(train_pred)]
-test_cat <- test_pred[, (length(test_pred)+1):ncol(test_pred)]
+train_cat <- train_pred[, (length(num_fields)+1):ncol(train_pred)]
+test_cat <- test_pred[, (length(num_fields)+1):ncol(test_pred)]
 
 Mode <- function(x) {
   ux <- unique(na.omit(x))
@@ -558,30 +560,31 @@ for(i in 1:ncol(test_cat)) {
   test_cat[is.na(test_cat[, i]), i] <- Mode(train_cat[, i])
 }
 
-sapply(train_cat, function(x) sum(is.na(x)))
-
-
-# Transform predictor variables to principle components
-set.seed(3219)
-pre_pca <- preProcess(cbind(train_num, train_cat), method = "pca")
-train_pca <- predict(pre_pca, cbind(train_num, train_cat))
-test_pca <- predict(pre_pca, cbind(test_num, test_cat))
-
-
 
 # Finalized data sets to be used in model development and testing
-train_data <- cbind(train.a$Class, train_pca) %>%
+train_data <- cbind(train.a$Class, train_num, train_cat) %>%
   rename(Class = `train.a$Class`)
 
-test_data <- test_pca
+test_data <- cbind(test_num, test_cat)
 test_label <- test.a$Class
+
+# Reformat the column names to remove "."
+tr_names <- colnames(train_data)
+tr_names <- gsub("\\.", "", tr_names)
+colnames(train_data) <- tr_names
+
+te_names <- colnames(test_data)
+te_names <- gsub("\\.", "", te_names)
+colnames(test_data) <- te_names
+
 
 # Remove all unnecessary objects from memory
 rm(list=setdiff(ls(), c("data4",
                         "train_index",
                         "train_data",
                         "test_data",
-                        "test_label")))
+                        "test_label",
+                        "num_fields")))
 
 
 # ======================================================
@@ -589,72 +592,53 @@ rm(list=setdiff(ls(), c("data4",
 # ======================================================
 
 # Train a Random Forest model with under-sampling during resample
-set.seed(3219)
 fitControl <- trainControl(
     method = "cv",                     # k-fold cross validation
-    number = 5,                        # number of folds
-    savePredictions = "final",         # saves predictions for optimal tuning parameter
-    classProbs = T,                    # should class probabilities be returned
-    summaryFunction = twoClassSummary, # results summary function
-    sampling = "down")                 # under-sample the majority class w/in each cv split
+    number = 5,                        # Number of folds
+    savePredictions = "final",         # Saves predictions for optimal tuning parameter
+    classProbs = T,                    # Should class probabilities be returned
+    summaryFunction = twoClassSummary, # Results summary function
+    sampling = "down")                 # Under-sample the majority class w/in each cv split
 
-# system.time(
-#   rf_model_down <- train(Class ~ .,
-#                          data = train_data,
-#                          method ='rf',
-#                          tuneLength = 5,
-#                          trControl = fitControl,
-#                          metric = "ROC")
-# )
-
-# Train a Random Forest model with SMOTE during resample
-# set.seed(3219)
-# fitControl$sampling = "smote"
-#
-# system.time(
-#   rf_model_smote <- train(Class ~ .,
-#                          data = train_data,
-#                          method ='rf',
-#                          tuneLength = 5,
-#                          trControl = fitControl,
-#                          metric = "ROC")
-# )
-
-# # Train a Random Forest model with ROSE during resample
 set.seed(3219)
-fitControl$sampling = "rose"
-
-system.time(
-  rf_model_rose <- train(Class ~ .,
+  rf_model_down <- train(Class ~ .,
                          data = train_data,
                          method ='rf',
                          tuneLength = 5,
                          trControl = fitControl,
                          metric = "ROC")
-)
 
 
+#Train a Random Forest model with up-sampling during resample
+fitControl$sampling = "up"
+
+set.seed(3219)
+  rf_model_up<- train(Class ~ .,
+                         data = train_data,
+                         method ='rf',
+                         tuneLength = 5,
+                         trControl = fitControl,
+                         metric = "ROC")
 
 
-print(rf_model_rose) #print the trained model summary
-train_plot <- plot(rf_model_rose) #plot the Kappa scores for the different ntree and mtry combinations
-print(train_plot)
-
-rf_pred <- predict(rf_model_rose, test_data) #apply trained random forest model to test data
-rf_cm <- confusionMatrix(rf_pred, test_label)
-rf_sens <- sensitivity(rf_pred, test_label)
-rf_spec <- specificity(rf_pred, test_label)
-
-rf_labels <- ifelse(test_label == "Fraud", 1, 0)
-rf_predictions <- ifelse(rf_pred == "Fraud", 1, 0)
-rf_roc <- roc(rf_labels, rf_predictions)
-rf_auc <- auc(rf_roc)
-print(rf_cm)
-print(rf_auc)
-
-#plot the top 20 most importance variables in the RF model
-var_imp_plot <- plot(varImp(rf_model, scale = FALSE), top = 20)
-print(var_imp_plot)
+# Evaluate the Random Forest Models
+models <- c("rf_model_down",
+            "rf_model_up")
+outcomes <- function(x) {
+  model <- eval(parse(text = x))
+  predictions <- predict(model, test_data) # Apply trained random forest model to test data
+  sens <- sensitivity(predictions, test_label) # Calculate the sensitivity
+  spec <- specificity(predictions, test_label) # Calculate the specificity
+  binary_labels <- ifelse(test_label == "Fraud", 1, 0)
+  binary_predictions <- ifelse(predictions == "Fraud", 1, 0)
+  roc <- as.numeric(as.character(roc(binary_labels, binary_predictions)$auc)) # Calculate the AUC
+  res <- data.frame(model = x,
+                    auc = roc,
+                    senstvty = sens,
+                    specfcty = spec)
+}
+rf_results <- do.call("rbind", lapply(models, function(x) outcomes(x)))
+print(rf_results)
 
 
 # ======================================================
@@ -662,101 +646,96 @@ print(var_imp_plot)
 # ======================================================
 xgb_imbalance_handling <- "upsample" # use either "downsample", "upsample", "smote"
 
-# Split the data4 data frame into train and test sets
-gb_train1 <- data4[train_index, ]
-gb_test1 <- data4[!(as.numeric(rownames(data4)) %in% train_index), ]
+train_pred <- data4[train_index, ]
+test_pred <- data4[!as.numeric(rownames(data4)) %in% train_index, ]
 
-# isolate the numeric variables of both the train and test sets
-num_fields <- colnames(gb_train1[sapply(gb_train1, is.numeric)])
-gb_train_num1 <- gb_train1[, num_fields]
-gb_test_num1 <- gb_test1[, num_fields]
+train_pred$Class <- as.factor(train_pred$Class)
+test_pred$Class <- as.factor(test_pred$Class)
 
-#Impute the values of numeric variables with the mean of the training set values
-for(i in 1:ncol(gb_train_num1)) {
-  gb_train_num1[is.na(gb_train_num1[, i]), i] <- mean(gb_train_num1[,i], na.rm = TRUE)
+# Impute the values of numeric variables with the mean of the training set values
+train_num <- train_pred[, 1:length(num_fields)]
+test_num <- test_pred[, 1:length(num_fields)]
+
+for(i in 1:ncol(train_num)) {
+train_num[is.na(train_num[,i]), i] <- mean(train_num[,i], na.rm = TRUE)
 }
 
-for(i in 1:ncol(gb_test_num1)) {
-  gb_test_num1[is.na(gb_test_num1[, i]), i] <- mean(gb_train_num1[,i], na.rm = TRUE)
+for(i in 1:ncol(test_num)) {
+test_num[is.na(test_num[,i]), i] <- mean(train_num[,i], na.rm = TRUE)
 }
 
-# Center and scale both the train and test sets,
-# based on the center and scale of the train set
-scale_process <- preProcess(gb_train_num1, method = c("center", "scale"))
-stand_train1 <- predict(scale_process, gb_train_num1)
-stand_test1 <- predict(scale_process, gb_test_num1)
+train_data <- cbind(train_num, train_pred[, !colnames(train_pred) %in% num_fields])
+test_data <- cbind(test_num, test_pred[, !colnames(test_pred) %in% num_fields])
 
-# Combine the newly-scaled numeric and categorical training variables back together
-gb_train2 <- cbind(stand_train1, gb_train1[, !(colnames(gb_train1) %in% num_fields)])
-gb_test <- cbind(stand_test1, gb_test1[, !(colnames(gb_test1) %in% num_fields)])
+if (xgb_imbalance_handling == "downsample") {
 
+# Down-sample the majority class of the training data
+set.seed(3219)
+gb_train <- downSample(x = train_data %>% select(-Class),
+                       y = train_data$Class)
+table(gb_train$Class)
 
-if (xgb_imblance_handling == "downsample") {
+} else {
+
+if (xgb_imbalance_handling == "upsample") {
 
 # Down-sample the majority class of the training data
   set.seed(3219)
-  gb_train <- downSample(x = gb_train2 %>% select(-Class),
-                         y = gb_train2$Class)
+  gb_train <- upSample(x = train_data %>% select(-Class),
+                       y = train_data$Class)
   table(gb_train$Class)
 
 } else {
 
-  if (xgb_imbalance_handling == "upsample") {
-
-# Down-sample the majority class of the training data
-    set.seed(3219)
-    gb_train <- upSample(x = gb_train2 %>% select(-Class),
-                         y = gb_train2$Class)
-    table(gb_train$Class)
-
-  } else {
-
-    if(xgb_imbalance_handling == "smote") {
+  if(xgb_imbalance_handling == "smote") {
 
 # Use SMOTE method to synthetically balance the classes of training data
-      set.seed(3219)
-      gb_train <- SMOTE(Class ~ .,
-                        gb_train2,
-                        perc.over = 5000,
-                        perc.under = 200)
-      table(gb_train$Class)
-    }
+    set.seed(3219)
+    gb_train <- SMOTE(Class ~ .,
+                      train_data,
+                      perc.over = 5000,
+                      perc.under = 200)
+    table(train_data$Class)
   }
 }
+}
 
-#create sparse matrix for numeric predictors
+gb_test <- test_data
+
+# Create sparse matrix for numeric predictors
 M.a <- sparse.model.matrix(~ creditLimit +
-                             availableMoney +
-                             transactionAmount +
-                             currentBalance +
-                             time_from_previous +
-                             total_trans_count +
-                             time_of_day +
-                             CustTimeZscore +
-                             CustAmtZscore +
-                             category_trans +
-                             category_dollars +
-                             total_dollars +
-                             perc_cat_trans +
-                             perc_cat_dollars +
-                             hour_trans +
-                             hour_dollars +
-                             perc_hour_trans +
-                             perc_hour_dollars -1,
-                           data = rbind(gb_train[, num_fields],
-                                        gb_test[, num_fields]))
+                           availableMoney +
+                           transactionAmount +
+                           currentBalance +
+                           time_from_previous +
+                           total_trans_count +
+                           LogCustTime +
+                           time_of_day +
+                           LogCustAmt +
+                           category_trans +
+                           category_dollars +
+                           total_trans +
+                           total_dollars +
+                           perc_cat_trans +
+                           perc_cat_dollars +
+                           hour_trans +
+                           hour_dollars +
+                           perc_hour_trans +
+                           perc_hour_dollars -1,
+                         data = rbind(gb_train[, num_fields],
+                                      gb_test[, num_fields]))
 
-#create sparse matrix for categorical predictors
-#################################################
+
+# Create sparse matrix for categorical predictors
 cats_train <- gb_train[, !(colnames(gb_train) %in% num_fields)] %>%
-  select(-Class)
+select(-Class)
 cats_test <- gb_test[, !(colnames(gb_test) %in% num_fields)] %>%
-  select(-Class)
+select(-Class)
 
 cats <- data.table(rbind(cats_train, cats_test))
 cats$account <- c(1:nrow(cats))
 
-#identify unique categorical feature values for each account (record)
+# Identify unique categorical feature values for each account (record)
 d1 <- cats[, list(account, acqCountry)]
 d2 <- cats[, list(account, merchantCountryCode)]
 d3 <- cats[, list(account, posEntryMode)]
@@ -779,39 +758,39 @@ d9[ , hour_of_day:= paste0("hour_of_day: ", hour_of_day)]
 
 names(d1) <- names(d2) <- names(d3) <- names(d4) <- names(d5) <- names(d6) <- names(d7) <- names(d8) <- c("account","feature_name")
 d <- rbind(d1, d2, d3, d4, d5, d6, d7, d8)
-rm(d1, d2, d3, d4, d5, d6, d7, d8); gc()
+rm(d1, d2, d3, d4, d5, d6, d7, d8)
 d <- unique(d)
 setkey(d, account)
 
-#creates a list of unique accounts (records)
+# Creates a list of unique accounts (records)
 ii <- as.character(unique(d$account))
-#creates a list of all unique feature_names
+# Creates a list of all unique feature_names
 jj <- unique(d$feature_name)
-#creates a list the length of dd that gives each account a unique identifier from 1: the number of unique accounts
+# Creates a list the length of dd that gives each account a unique identifier from 1: the number of unique accounts
 id_i <- match(d$account,ii)
-#same thing for feature_name
+# Same thing for feature_name
 id_j <- match(d$feature_name,jj)
 id_ij <- cbind(id_i,id_j)
-#creates a matrix frame that has the feature_names as column names and accounts as row names, and every point is blank
+# Creates a matrix frame that has the feature_names as column names and accounts as row names, and every point is blank
 M.b <- Matrix(0,nrow=length(ii),ncol=length(jj),
-              dimnames=list(ii,jj),sparse=T)
-#if the account and feature_name are found together in the id_i data frame, then mark it as a 1 in the M.b matrix
+            dimnames=list(ii,jj),sparse=T)
+# If the account and feature_name are found together in the id_i data frame, then mark it as a 1 in the M.b matrix
 M.b[id_ij] <- 1
 rm(ii,jj,id_i,id_j,id_ij)
 
-#combine the numeric and categorical matrices
+# Combine the numeric and categorical matrices
 M <- cbind(M.a, M.b)
 
-#create xgb matrices for the xgboost model
-#################################################
-train_data <- M[1:nrow(gb_train), ]
+
+# Create xgb matrices for the xgboost model
+gb_train_matrix <- M[1:nrow(gb_train), ]
 
 set.seed(3219)
 gbtrain_index <- createDataPartition(y = gb_train$Class, p = 0.95, list = FALSE)
-trw_data <- train_data[gbtrain_index[, 1], ]
-tew_data <- train_data[-gbtrain_index[, 1], ]
+trw_data <- gb_train_matrix[gbtrain_index[, 1], ]
+tew_data <- gb_train_matrix[-gbtrain_index[, 1], ]
 
-test_data <- M[(nrow(gb_train)+1):nrow(M), ]
+gb_test_matrix <- M[(nrow(gb_train)+1):nrow(M), ]
 
 trw_label <- ifelse(gb_train[gbtrain_index[, 1], ]$Class == "Fraud", 1, 0)
 tew_label <- ifelse(gb_train[-gbtrain_index[, 1], ]$Class == "Fraud", 1, 0)
@@ -821,156 +800,32 @@ dtrain_tr <- xgb.DMatrix(data = trw_data, label = trw_label)
 dtrain_te <- xgb.DMatrix(data = tew_data, label = tew_label)
 dtest <- xgb.DMatrix(data = test_data, label = test_label)
 
-#train xgboost tree model
-##############################
-set.seed(3219)
+
+# Train xgboost tree model
 watchlist <- list(train = dtrain_tr, test = dtrain_te)
+
+set.seed(3219)
 bst <- xgb.train(data = dtrain_tr,
-                 watchlist = watchlist,
-                 eta = .1,
-                 nround = 400,
-                 max_depth = 4,
-                 booster = "gbtree",
-                 objective = "binary:logistic",
-                 eval_metric = "auc")
+               watchlist = watchlist,
+               eta = .1,
+               nround = 400,
+               max_depth = 4,
+               booster = "gbtree",
+               objective = "binary:logistic",
+               eval_metric = "auc")
 
-
-gb_pred <- as.factor(ifelse(predict(bst, test_data) >= .5, "Fraud", "NotFraud")) #apply trained xgboost model to test data
+gb_pred <- as.factor(ifelse(predict(bst, gb_test_matrix) >= .5, "Fraud", "NotFraud")) #apply trained xgboost model to test data
 test_label_comp <- as.factor(ifelse(test_label == 1, "Fraud", "NotFraud"))
+sens <- sensitivity(gb_pred, test_label_comp)
+spec <- specificity(gb_pred, test_label_comp)
 gb_cm <- confusionMatrix(gb_pred, test_label_comp)
+binary_predictions <- ifelse(gb_pred == "Fraud", 1, 0)
+roc <- as.numeric(as.character(roc(test_label, binary_predictions)$auc)) # Calculate the AUC
+gb_results <- data.frame(model = "xgboost upsample",
+                 auc = roc,
+                 senstvty = sens,
+                 specfcty = spec)
 
-gb_predictions <- ifelse(gb_pred == "Fraud", 1, 0)
-gb_roc <- roc(test_label, gb_predictions)
-gb_auc <- auc(gb_roc)
-
-print(paste(xgb_imbalance_handling, "re-sampling  method"))
-table(gb_train$Class) # resampled training data split
-print(gb_cm$table)
-print(gb_auc)
+print(gb_results)
 
 xgb.importance(feature_names = NULL, model = bst)
-
-roc_rose <- plot(roc(test_label, gb_predictions), print.auc = TRUE, col = "blue")
-
-
-
-
-# Area under the curve: 0.7235 UPSAMPLING
-# bst <- xgb.train(data = dtrain_tr,
-#                  watchlist = watchlist,
-#                  eta = .1,
-#                  nround = 400,
-#                  max_depth = 4,
-#                  booster = "gbtree",
-#                  objective = "binary:logistic",
-#                  eval_metric = "auc")
-
-
-# AUC .7111
-# bst <- xgb.train(data = dtrain_tr, #downsample
-#                  watchlist = watchlist,
-#                  eta = .1, #.1
-#                  nround = 1000, #500
-#                  max_depth = 4, #4
-#                  booster = "gbtree", #gbtree
-#                  objective = "binary:logistic", #binary:logistic
-#                  eval_metric = "auc")
-
-# AUC .7174
-# bst <- xgb.train(data = dtrain_tr, #downsample
-#                  watchlist = watchlist,
-#                  eta = .1, #.1
-#                  nround = 500, #500
-#                  max_depth = 4, #4
-#                  booster = "gbtree", #gbtree
-#                  objective = "binary:logistic", #binary:logistic
-#                  eval_metric = "auc")
-
-#AUC .7178
-# bst <- xgb.train(data = dtrain_tr, #upsample
-#                  watchlist = watchlist,
-#                  eta = .1,
-#                  nround = 500,
-#                  max_depth = 4,
-#                  booster = "gbtree",
-#                  objective = "binary:logistic",
-#                  eval_metric = "auc")
-
-# Area under the curve: 0.7102 upsampling
-# bst <- xgb.train(data = dtrain_tr,
-#                  watchlist = watchlist,
-#                  eta = .1,
-#                  nround = 1000,
-#                  max_depth = 4,
-#                  booster = "gbtree",
-#                  objective = "binary:logistic",
-#                  eval_metric = "auc")
-
-# Area under the curve: 0.5285 smote
-# gb_train <- SMOTE(Class ~ .,
-#                   gb_train2,
-#                   perc.over = 500,
-#                   perc.under = 200)
-# bst <- xgb.train(data = dtrain_tr,
-#                  watchlist = watchlist,
-#                  eta = .1,
-#                  nround = 400,
-#                  max_depth = 4,
-#                  booster = "gbtree",
-#                  objective = "binary:logistic",
-#                  eval_metric = "auc")
-
-
-
-
-# IF I HAD MORE TIME:
-# -- Recursive Feature Elimination
-# -- Trying to improve performance by rebalancing the training set
-
-
-t <- data.frame(a = c("Brandon", "Brandon", "Brandon", NA,
-                      "Kyler", NA, "Kyler", "Kyler",
-                      "Trent", "Trent", "Trent", "Trent"),
-                b = c(1, 5, 3, 2,
-                      13.2, 4.1, 13.2, 14.5,
-                      26.2, 58.5, NA, 46.5))
-
-s <- c(1, 4, 4, 2, 5, 3, 4, 5, 1, 1, 1, 1)
-
-
-# #chi2_data <- chi2_data[, c(1, 4, 7)]
-#
-# start <- Sys.time()
-# chi2_pvalues <- c()
-# chi2_colnames <- c()
-# chi2_rownames <- c()
-# for (i in c(1:ncol(chi2_data))) {
-#
-#   chi2_col1 <- chi2_data[, i]
-#   chi2_pvalues1 <- c()
-#   chi2_rownames1 <- c()
-#   for (j in c(1:ncol(chi2_data))) {
-#     df_matrix <- as.data.frame.matrix(table(chi2_col1, chi2_data[, c(j)]))
-#     chi2_values1 <- c(chisq.test(df_matrix, simulate.p.value = TRUE))
-#     chi2_pvalues1 <- c(chi2_pvalues1, chi2_values1$p.value)
-#   }
-#   chi2_pvalues <- c(chi2_pvalues, chi2_pvalues1)
-#   chi2_colnames <- c(, )
-# }
-# end <- Sys.time()
-# end - start
-
-# chi2_outer <- function(x) {
-#   field1 <- chi2_data[, x]
-#
-#   chi2_inner <- function(y) {
-#     field2 <- chi2_data[, y]
-#     df_matrix <- as.data.frame.matrix(table(field1, field2))
-#     chi2_values_y <- c(chisq.test(df_matrix, simulate.p.value = TRUE))
-#     output1 <- data.frame(field1_name = colnames(chi2_data[1]),
-#                          field2_name = colnames(chi2_data[y]),
-#                          p_value = chi2_values_y$p.value)
-#   }
-#   output2 <- do.call("rbind", lapply(c(1:ncol(chi2_data)), function(y) chi2_inner(y)))
-# }
-# chi2_output <- do.call("rbind", lapply(c(1:ncol(chi2_data)), function(x) chi2_outer(x)))
